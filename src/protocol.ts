@@ -1,46 +1,49 @@
 import crypto from "node:crypto";
 
 // ---------------------------------------------------------------------------
-// x402 wire protocol.
+// x402 wire protocol — v1 AND v2.
 //
-// This file is the contract with every other x402 implementation, so it is
-// deliberately a mirror of apps/web/src/lib/x402.ts. An agent that can pay
-// FurlPay's own priced resources (e.g. GET /api/x402/fx) can pay ANY endpoint
-// behind this gateway, byte for byte, with no client changes.
+// v2 shipped Dec 2025 and is not just a header rename. The shapes changed:
 //
-// The flow (scheme "exact"):
+//   v1                                    v2
+//   ─────────────────────────────────     ─────────────────────────────────
+//   X-PAYMENT (request)                   PAYMENT-SIGNATURE (request)
+//   X-PAYMENT-RESPONSE (response)         PAYMENT-RESPONSE (response)
+//   402 data in the BODY                  402 data in PAYMENT-REQUIRED header
+//   requirements.maxAmountRequired        requirements.amount
+//   requirements.resource/description     top-level resource: ResourceInfo
+//   payload.extra (quote echo)            payload.accepted (full requirements)
 //
-//   1. client  GET /resource
-//   2. server  402 + { x402Version, accepts: [PaymentRequirements] }
-//   3. client  signs an EIP-3009 `transferWithAuthorization` OFF-CHAIN
-//   4. client  GET /resource  with  X-PAYMENT: base64(XPaymentPayload)
-//   5. gateway verifies, hands the authorization to a facilitator, which
-//              submits it on-chain and pays the gas
-//   6. server  200 + X-PAYMENT-RESPONSE receipt
+// Both are supported here, and the version is negotiated per request: we answer
+// in whatever dialect the client spoke. A 402 advertises BOTH (v2 in the
+// PAYMENT-REQUIRED header, v1 in the body), which is exactly what v2's move of
+// payment data out of the body makes possible.
 //
-// Note step 3/5: the client NEVER submits a transaction itself and never pays
-// gas, so there is no "transaction hash" to verify against an RPC. Anything
-// that asks the payer for a tx hash is not x402 — it is a different (and much
-// worse) protocol, because it forces the agent to hold native gas on every
-// chain it might want to buy from.
+// The payment model is identical across versions and is the thing people get
+// wrong: the client signs an EIP-3009 authorization OFF-CHAIN. It never submits
+// a transaction and never holds gas. The facilitator submits and pays the gas.
+// Any design that asks the payer for a transaction hash is not x402.
 // ---------------------------------------------------------------------------
 
-export const X402_VERSION = 1;
+export type X402Version = 1 | 2;
 
-/** Request header carrying the base64 payment payload. */
-export const PAYMENT_HEADER = "x-payment";
-/** Response header carrying the settlement receipt. */
-export const RECEIPT_HEADER = "x-payment-response";
+/** Default dialect for freshly-minted quotes when the client hasn't spoken yet. */
+export const LATEST_X402_VERSION: X402Version = 2;
+
+// ── headers ───────────────────────────────────────────────────────────────
+export const HEADER_V1_PAYMENT = "x-payment";
+export const HEADER_V1_RECEIPT = "X-PAYMENT-RESPONSE";
+export const HEADER_V2_PAYMENT = "payment-signature";
+export const HEADER_V2_RECEIPT = "PAYMENT-RESPONSE";
+export const HEADER_V2_REQUIRED = "PAYMENT-REQUIRED";
 
 /** Web-layer hardening: cap the header before we spend cycles parsing it. */
 export const MAX_HEADER_BYTES = 8192;
 
-/** Default quote lifetime. Long enough for an agent to sign, short enough that
- *  a leaked quote is near-worthless. */
 export const DEFAULT_QUOTE_TTL_SECONDS = 300;
 
-/** How long a spent quote/nonce claim is retained. Must outlive any EIP-3009
- *  validity window, or a late replay could re-claim a freed key. */
+/** Must outlive any EIP-3009 validity window, or a late replay could re-claim a
+ *  freed key. */
 export const REPLAY_CLAIM_TTL_SECONDS = 86_400;
 
 /** Canonical (native-issuance, not bridged) USDC per network. */
@@ -53,35 +56,9 @@ export const NETWORK_USDC: Record<string, string> = {
   solana: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
 };
 
-/** USDC is 6-decimal on every network above. */
 export const USDC_DECIMALS = 6;
 
-export interface PaymentRequirements {
-  scheme: "exact";
-  network: string;
-  maxAmountRequired: string; // atomic units
-  resource: string;
-  description: string;
-  mimeType: string;
-  payTo: string;
-  maxTimeoutSeconds: number;
-  asset: string;
-  extra: {
-    name: string;
-    version: string;
-    quoteId: string;
-    expiresAt: number; // unix seconds
-    binding: string; // HMAC binding this quote to (method, resource, amount)
-    /** Present only when the quote is bound to a request body (see bindingMac). */
-    bodyHash?: string;
-  };
-}
-
-export interface X402Challenge {
-  x402Version: number;
-  error: string;
-  accepts: PaymentRequirements[];
-}
+// ── shared ────────────────────────────────────────────────────────────────
 
 export interface EIP3009Authorization {
   from: string;
@@ -92,38 +69,117 @@ export interface EIP3009Authorization {
   nonce: string;
 }
 
-export interface XPaymentPayload {
-  x402Version: number;
-  scheme: string;
-  network: string;
-  payload: {
-    signature: string;
-    authorization: EIP3009Authorization;
-  };
-  /** Echo of the quote the client is paying against. Never trusted on its own —
-   *  every field is re-derived server-side and compared. */
-  extra?: {
-    quoteId?: string;
-    binding?: string;
-    expiresAt?: number;
-    bodyHash?: string;
-  };
+/** The quote fields we carry in `extra` — identical across v1 and v2, which is
+ *  what lets one binding scheme serve both. */
+export interface QuoteExtra {
+  name: string;
+  version: string;
+  quoteId: string;
+  expiresAt: number;
+  binding: string;
+  bodyHash?: string;
+  [k: string]: unknown;
 }
 
-/** Keep paid content and fresh quotes out of every shared/CDN cache. A 200 that
- *  a CDN caches is a paid resource served free to the next unpaid client. */
+// ── v1 ────────────────────────────────────────────────────────────────────
+
+export interface PaymentRequirementsV1 {
+  scheme: "exact";
+  network: string;
+  maxAmountRequired: string;
+  resource: string;
+  description: string;
+  mimeType: string;
+  outputSchema?: Record<string, unknown>;
+  payTo: string;
+  maxTimeoutSeconds: number;
+  asset: string;
+  extra: QuoteExtra;
+}
+
+export interface PaymentRequiredV1 {
+  x402Version: 1;
+  error: string;
+  accepts: PaymentRequirementsV1[];
+}
+
+export interface PaymentPayloadV1 {
+  x402Version: 1;
+  scheme: string;
+  network: string;
+  payload: { signature: string; authorization: EIP3009Authorization };
+  extra?: Partial<QuoteExtra>;
+}
+
+// ── v2 ────────────────────────────────────────────────────────────────────
+
+/** v2 hoists resource metadata out of each requirement. `tags` / `serviceName`
+ *  / `iconUrl` are the protocol's native discovery fields — a facilitator can
+ *  crawl these, which is why a proprietary discovery index is the wrong build. */
+export interface ResourceInfo {
+  url: string;
+  description?: string;
+  mimeType?: string;
+  serviceName?: string;
+  tags?: string[];
+  iconUrl?: string;
+}
+
+export interface PaymentRequirementsV2 {
+  scheme: "exact";
+  network: string;
+  asset: string;
+  amount: string; // v1's maxAmountRequired
+  payTo: string;
+  maxTimeoutSeconds: number;
+  extra: QuoteExtra;
+}
+
+export interface PaymentRequiredV2 {
+  x402Version: 2;
+  error?: string;
+  resource: ResourceInfo;
+  accepts: PaymentRequirementsV2[];
+  extensions?: Record<string, unknown>;
+}
+
+export interface PaymentPayloadV2 {
+  x402Version: 2;
+  resource?: ResourceInfo;
+  /** The client echoes the FULL requirements it is paying against. Still not
+   *  trusted — every field is re-derived server-side and compared. */
+  accepted: PaymentRequirementsV2;
+  payload: { signature: string; authorization: EIP3009Authorization };
+  extensions?: Record<string, unknown>;
+}
+
+// ── normalized view ───────────────────────────────────────────────────────
+
+/** One internal shape both dialects collapse to, so the gate is written once. */
+export interface NormalizedPayment {
+  version: X402Version;
+  scheme: string;
+  network: string;
+  signature: string;
+  authorization: EIP3009Authorization;
+  /** Quote echo — the lookup key, never an assertion. */
+  quoteId?: string;
+  binding?: string;
+  expiresAt?: number;
+  bodyHash?: string;
+}
+
+// ── cache hygiene ─────────────────────────────────────────────────────────
+
+/** A paid 200 that a CDN caches is a paid resource served free to the next
+ *  unpaid caller. `Vary` covers both dialects' request headers. */
 export const noStoreHeaders: Record<string, string> = {
   "Cache-Control": "no-store, private, max-age=0",
-  Vary: "X-PAYMENT",
+  Vary: "X-PAYMENT, PAYMENT-SIGNATURE",
 };
 
-/**
- * Confirmation depth required before releasing a resource, scaled to value.
- *
- * A settlement that is submitted but later reorged leaves the seller unpaid but
- * the resource already delivered. Depth is the only defence, and it is only
- * worth paying for in proportion to what is at stake.
- */
+// ── value-scaled settlement depth ─────────────────────────────────────────
+
 export function requiredConfirmations(amountAtomic: string): number {
   let usd: number;
   try {
@@ -136,7 +192,6 @@ export function requiredConfirmations(amountAtomic: string): number {
   return 12;
 }
 
-/** USD price → atomic units, as a decimal string. */
 export function atomicAmount(priceUsd: number, decimals: number = USDC_DECIMALS): string {
   if (!Number.isFinite(priceUsd) || priceUsd <= 0) {
     throw new RangeError(`price must be a positive finite number (got ${priceUsd})`);
@@ -144,28 +199,25 @@ export function atomicAmount(priceUsd: number, decimals: number = USDC_DECIMALS)
   return String(Math.round(priceUsd * 10 ** decimals));
 }
 
+// ── binding ───────────────────────────────────────────────────────────────
+
 export interface BindingInput {
   method: string;
   resource: string;
-  amount: string; // atomic
+  amount: string;
   quoteId: string;
   expiresAt: number;
-  /** sha256 of the raw request body, when the quote is body-bound. */
   bodyHash?: string;
 }
 
 /**
- * HMAC that binds a quote to exactly one (method, resource, amount) — and, when
- * a body is present, to exactly one body.
+ * HMAC binding a quote to exactly one (method, resource, amount) — and, when a
+ * body is present, exactly one body.
  *
- * This is what stops cross-resource substitution: a payment authorized for
- * `GET /weather/london` at $0.001 cannot be presented to unlock
- * `POST /inference/gpt-5` at $2.00, because the MAC over the cheap quote will
- * not validate against the expensive resource's server-side expectation.
- *
- * The no-body form is byte-identical to apps/web/src/lib/x402.ts so quotes are
- * interchangeable between this gateway and FurlPay's first-party resources. The
- * body-hash term is a strict superset, appended only when body binding is on.
+ * Deliberately version-independent: the same MAC validates a v1 or a v2 payment,
+ * because both dialects carry the quote in `extra`. It is also byte-identical to
+ * apps/web/src/lib/x402.ts, so quotes stay interchangeable with FurlPay's
+ * first-party resources.
  */
 export function bindingMac(secret: string | Buffer, input: BindingInput): string {
   const base = `${input.method} ${input.resource} ${input.amount} ${input.quoteId} ${input.expiresAt}`;
@@ -173,12 +225,10 @@ export function bindingMac(secret: string | Buffer, input: BindingInput): string
   return crypto.createHmac("sha256", secret).update(message).digest("hex");
 }
 
-/** sha256 of a raw request body. */
 export function hashBody(body: string | Buffer): string {
   return crypto.createHash("sha256").update(body).digest("hex");
 }
 
-/** Constant-time compare of two hex strings of equal length. */
 export function timingSafeEqualHex(a: string, b: string): boolean {
   const ba = Buffer.from(a, "utf8");
   const bb = Buffer.from(b, "utf8");
@@ -186,35 +236,104 @@ export function timingSafeEqualHex(a: string, b: string): boolean {
   return crypto.timingSafeEqual(ba, bb);
 }
 
+// ── codec ─────────────────────────────────────────────────────────────────
+
+export function b64encode(value: unknown): string {
+  return Buffer.from(JSON.stringify(value), "utf8").toString("base64");
+}
+
+export function b64decode<T>(value: string): T {
+  return JSON.parse(Buffer.from(value, "base64").toString("utf8")) as T;
+}
+
+export type HeaderLookup = (name: string) => string | null;
+
+/** Which dialect did the client speak? `null` when it presented no payment. */
+export function detectVersion(get: HeaderLookup): X402Version | null {
+  if (get(HEADER_V2_PAYMENT)) return 2;
+  if (get(HEADER_V1_PAYMENT)) return 1;
+  return null;
+}
+
 export type DecodedPayment =
-  | { ok: true; payload: XPaymentPayload }
+  | { ok: true; payment: NormalizedPayment }
   | { ok: false; error: string };
 
-/** Strict parse of the X-PAYMENT header. Malformed input is a 400, never a
- *  silently-released resource. */
-export function decodePaymentHeader(header: string | null | undefined): DecodedPayment {
-  if (!header) return { ok: false, error: "X-PAYMENT header required" };
-  if (header.length > MAX_HEADER_BYTES) return { ok: false, error: "X-PAYMENT too large" };
-
-  let payload: XPaymentPayload;
-  try {
-    payload = JSON.parse(Buffer.from(header, "base64").toString("utf8"));
-  } catch {
-    return { ok: false, error: "X-PAYMENT is not valid base64 JSON" };
-  }
-
-  const auth = payload?.payload?.authorization;
-  if (payload?.x402Version !== X402_VERSION) return { ok: false, error: "Unsupported x402 version" };
-  if (!auth || typeof payload?.payload?.signature !== "string") {
-    return { ok: false, error: "Malformed x402 payload" };
-  }
-  for (const field of ["from", "to", "value", "validAfter", "validBefore", "nonce"] as const) {
-    if (typeof auth[field] !== "string" || auth[field].length === 0) {
-      return { ok: false, error: `Malformed authorization (missing ${field})` };
-    }
-  }
-  return { ok: true, payload };
+function validAuthorization(auth: unknown): auth is EIP3009Authorization {
+  if (!auth || typeof auth !== "object") return false;
+  const a = auth as Record<string, unknown>;
+  return (["from", "to", "value", "validAfter", "validBefore", "nonce"] as const).every(
+    (f) => typeof a[f] === "string" && (a[f] as string).length > 0
+  );
 }
+
+/**
+ * Strict parse of whichever payment header is present, normalized to one shape.
+ * Malformed input is an error, never a silently-released resource.
+ */
+export function decodePayment(get: HeaderLookup): DecodedPayment {
+  const version = detectVersion(get);
+  if (version === null) return { ok: false, error: "Payment required" };
+
+  const raw = version === 2 ? get(HEADER_V2_PAYMENT)! : get(HEADER_V1_PAYMENT)!;
+  if (raw.length > MAX_HEADER_BYTES) return { ok: false, error: "Payment header too large" };
+
+  let parsed: unknown;
+  try {
+    parsed = b64decode(raw);
+  } catch {
+    return { ok: false, error: "Payment header is not valid base64 JSON" };
+  }
+
+  if (version === 2) {
+    const p = parsed as PaymentPayloadV2;
+    if (p?.x402Version !== 2) return { ok: false, error: "Unsupported x402 version" };
+    if (!p.accepted || typeof p.accepted !== "object") {
+      return { ok: false, error: "Malformed v2 payload (missing `accepted`)" };
+    }
+    if (typeof p.payload?.signature !== "string" || !validAuthorization(p.payload?.authorization)) {
+      return { ok: false, error: "Malformed v2 payload (bad signature/authorization)" };
+    }
+    const extra = (p.accepted.extra ?? {}) as Partial<QuoteExtra>;
+    return {
+      ok: true,
+      payment: {
+        version: 2,
+        scheme: p.accepted.scheme,
+        network: p.accepted.network,
+        signature: p.payload.signature,
+        authorization: p.payload.authorization,
+        quoteId: extra.quoteId,
+        binding: extra.binding,
+        expiresAt: extra.expiresAt,
+        bodyHash: extra.bodyHash,
+      },
+    };
+  }
+
+  const p = parsed as PaymentPayloadV1;
+  if (p?.x402Version !== 1) return { ok: false, error: "Unsupported x402 version" };
+  if (typeof p.payload?.signature !== "string" || !validAuthorization(p.payload?.authorization)) {
+    return { ok: false, error: "Malformed v1 payload (bad signature/authorization)" };
+  }
+  const extra = (p.extra ?? {}) as Partial<QuoteExtra>;
+  return {
+    ok: true,
+    payment: {
+      version: 1,
+      scheme: p.scheme,
+      network: p.network,
+      signature: p.payload.signature,
+      authorization: p.payload.authorization,
+      quoteId: extra.quoteId,
+      binding: extra.binding,
+      expiresAt: extra.expiresAt,
+      bodyHash: extra.bodyHash,
+    },
+  };
+}
+
+// ── receipts ──────────────────────────────────────────────────────────────
 
 export interface SettlementReceipt {
   payer: string;
@@ -227,14 +346,25 @@ export interface SettlementReceipt {
   settledAt: string;
 }
 
-/** Value for the X-PAYMENT-RESPONSE header — the client's proof it paid. */
-export function encodeReceipt(receipt: SettlementReceipt): string {
-  return Buffer.from(JSON.stringify(receipt), "utf8").toString("base64");
+/** v1 receipt — FurlPay's own X-PAYMENT-RESPONSE shape. */
+export function encodeReceiptV1(receipt: SettlementReceipt): string {
+  return b64encode(receipt);
+}
+
+/** v2 receipt — the reference SDK's SettleResponse shape. */
+export function encodeReceiptV2(receipt: SettlementReceipt): string {
+  return b64encode({
+    success: true,
+    transaction: receipt.transaction,
+    network: receipt.network,
+    payer: receipt.payer,
+    amount: receipt.amountAtomic,
+  });
 }
 
 export function decodeReceipt(header: string): SettlementReceipt | null {
   try {
-    return JSON.parse(Buffer.from(header, "base64").toString("utf8"));
+    return b64decode<SettlementReceipt>(header);
   } catch {
     return null;
   }

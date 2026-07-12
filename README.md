@@ -6,7 +6,8 @@ An x402 monetization gateway you host yourself. Point it at an endpoint, set a
 price, and AI agents pay per request in USDC — no account, no API key, no
 subscription, no invoice.
 
-Framework-agnostic. Zero runtime dependencies. MIT.
+**Speaks x402 v1 and v2**, negotiated per request. Framework-agnostic. Zero
+runtime dependencies. MIT.
 
 ```sh
 npm install @furlpay/gateway
@@ -21,9 +22,26 @@ route settlement through Coinbase's facilitator. That's fine if you're happy
 being a tenant. This package is for everyone who wants the paywall to be *theirs*:
 self-hosted, portable across clouds, with a facilitator you choose.
 
-It speaks the same wire protocol as FurlPay's own priced resources, so any agent
-that can pay `GET https://furlpay.com/api/x402/fx` can pay your endpoint with no
-client changes.
+## v1 and v2, at the same time
+
+x402 v2 (Dec 2025) is not a header rename. The shapes changed:
+
+| | v1 | v2 |
+| --- | --- | --- |
+| request header | `X-PAYMENT` | `PAYMENT-SIGNATURE` |
+| response header | `X-PAYMENT-RESPONSE` | `PAYMENT-RESPONSE` |
+| 402 payload | in the **body** | in the **`PAYMENT-REQUIRED` header** |
+| price field | `maxAmountRequired` | `amount` |
+| resource metadata | per-requirement | hoisted to `ResourceInfo` |
+| client echo | `extra` | full `accepted` requirements |
+
+A 402 from this gateway **advertises both at once** — v2 in the `PAYMENT-REQUIRED`
+header, v1 in the body. A v2 agent reads the header, a v1 agent reads the body,
+and neither needs to know the other exists. (v2 moving payment data out of the
+body is exactly what makes this possible.) The gateway then answers in whatever
+dialect the client spoke, and calls the facilitator in that dialect too.
+
+You don't configure any of this. It just works for both.
 
 ## Quickstart
 
@@ -119,10 +137,30 @@ exactly the problem x402 exists to remove.
 | `network` | `base` | `arbitrum`, `base`, `polygon`, `solana`, + testnets. |
 | `asset` | canonical USDC | Override for a non-USDC token. |
 | `facilitator` | FurlPay | URL or a `FacilitatorClient`. Any x402 facilitator works. |
+| `facilitatorVersion` | mirrors client | Pin to `1` for a v1-only facilitator; v2 payments get downconverted. |
 | `claimStore` | in-memory | **Must be shared in multi-instance deploys — see below.** |
+| `serviceName` / `tags` / `iconUrl` | — | v2 discovery metadata. See below. |
 | `bindBody` | `true` | Bind the quote to a hash of the request body. |
 | `settle` | `true` | `false` verifies but does not collect. Rarely what you want. |
 | `onSettled` | — | Fires on confirmed settlement — ledger, webhooks, metering. |
+
+### Discovery is in the protocol — don't build an index
+
+v2's `ResourceInfo` carries `description`, `serviceName`, `tags` and `iconUrl`,
+and facilitators **crawl those fields**. Filling them in is how your resource
+becomes discoverable to agents. You do not need a proprietary directory, and
+building one would mean maintaining a walled garden that nobody's crawler visits.
+
+```ts
+paywall({
+  price: 0.01,
+  payTo,
+  quoteSecret,
+  serviceName: "Acme Weather",
+  tags: ["weather", "forecast"],
+  iconUrl: "https://acme.dev/icon.png",
+});
+```
 
 `quoteSecret` has no default because a default would be a *published* default,
 and a published default is a forgeable quote for every deployment that didn't
@@ -144,23 +182,23 @@ times clears N different Sets and delivers the resource N times — **one paymen
 N deliveries.**
 
 The default `MemoryClaimStore` is correct on exactly one instance and reports
-`isDurable === false`. On more than one, pass a shared store:
+`isDurable === false`. On more than one, use the built-in Upstash store — it's a
+single `SET NX EX` over the REST API, so it adds no dependency:
 
 ```ts
-import { Redis } from "@upstash/redis";
-import { paywall, claimStoreFrom } from "@furlpay/gateway";
-
-const redis = Redis.fromEnv();
+import { paywall, upstashClaimStore } from "@furlpay/gateway";
 
 const pay = paywall({
   price: 0.01,
   payTo,
   quoteSecret,
-  claimStore: claimStoreFrom(
-    (key, ttl) => redis.set(key, 1, { nx: true, ex: ttl }).then((r) => r === "OK")
-  ),
+  claimStore: upstashClaimStore(), // UPSTASH_REDIS_REST_URL + _TOKEN
 });
 ```
+
+It throws rather than start without credentials, because silently degrading to
+in-memory would *look* durable and not be — the worst possible failure mode for
+replay protection. Any other backend works via `claimStoreFrom(setNx)`.
 
 Assert it at boot so you find out at deploy time, not during an incident:
 
@@ -183,8 +221,10 @@ Every one of these is covered by a test in `test/gateway.test.js`.
 | **Cache leakage** — a CDN caches the paid 200 and serves it free | `Cache-Control: no-store` + `Vary: X-PAYMENT` on paid responses *and* on 402 quotes. In proxy mode the origin's own cache headers are overridden. |
 | **Underpayment** — pay `9000` against a `10000` quote | Amounts compare as integers. (`"9000" > "10000"` lexicographically — a string compare here is a real vulnerability.) |
 | **Quote forgery / tampering** | Constant-time HMAC compare. Amount, recipient, network, and expiry are all re-derived server-side; the client's echo is a lookup key, never an assertion. |
+| **Cross-dialect double-spend** — pay a quote as v1, re-present the same quote as v2 with a fresh nonce | The quoteId claim is dialect-blind. One quote buys exactly one delivery, in any version. |
 | **Facilitator outage** | Fails closed. A facilitator you can't reach costs you a sale, not the resource. |
 | **Settlement error** | The nonce stays burned — a failed settle may still land on-chain, so freeing it would reopen replay against a payment that does confirm. Honest retries sign a fresh nonce, so this never blocks a real payer. |
+| **`upto` over-reporting** | v2's `upto` scheme can settle *less* than authorized. The receipt reports what was actually taken, not what was authorized. |
 
 For facilitator-side hardening (allowance overdraft, denial-of-settlement,
 hidden-compute pricing), see [`@furlpay/x402-guard`](../x402-guard).

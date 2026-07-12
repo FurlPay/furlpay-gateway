@@ -94,16 +94,17 @@ export function createProxy(opts: ProxyOptions): http.Server {
           send(decision.status, decision.body, decision.headers);
           return;
         }
-        res.setHeader("X-PAYMENT-RESPONSE", decision.headers["X-PAYMENT-RESPONSE"]);
-        res.setHeader("Cache-Control", "no-store, private, max-age=0");
-        res.setHeader("Vary", "X-PAYMENT");
+        // Both dialects' receipts, plus the cache guards.
+        for (const [k, v] of Object.entries(decision.headers)) res.setHeader(k, v);
       }
 
       // Forward to the origin.
       const forwardHeaders: Record<string, string> = {};
       for (const [k, v] of Object.entries(req.headers)) {
-        if (HOP_BY_HOP.has(k.toLowerCase())) continue;
-        if (k.toLowerCase() === "x-payment") continue; // the origin has no use for it
+        const key = k.toLowerCase();
+        if (HOP_BY_HOP.has(key)) continue;
+        // The origin has no use for the payment credential, in either dialect.
+        if (key === "x-payment" || key === "payment-signature") continue;
         if (typeof v === "string") forwardHeaders[k] = v;
         else if (Array.isArray(v)) forwardHeaders[k] = v.join(", ");
       }

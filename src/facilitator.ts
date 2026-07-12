@@ -1,30 +1,34 @@
-import { X402_VERSION, type PaymentRequirements, type XPaymentPayload } from "./protocol.js";
+import type {
+  PaymentPayloadV1,
+  PaymentPayloadV2,
+  PaymentRequirementsV1,
+  PaymentRequirementsV2,
+} from "./protocol.js";
 
 // ---------------------------------------------------------------------------
 // Facilitator client.
 //
 // The facilitator is the only party that touches a chain: it verifies the
 // EIP-3009 authorization, submits it, and pays the gas. Keeping it behind an
-// interface is the whole point — the gateway never needs a private key, an RPC
-// endpoint, or a gas balance, which is what makes it safe to self-host.
+// interface is the whole point — the gateway needs no private key, no RPC
+// endpoint and no gas balance, which is what makes it safe to self-host.
 //
-// Default: FurlPay's facilitator (Arbitrum, Base, Solana). Any x402-compliant
-// facilitator works; point `baseUrl` at Coinbase's and this gateway settles
-// through Coinbase instead, with no other change.
+// Default: FurlPay's facilitator. Any x402-compliant facilitator works; point
+// `baseUrl` at Coinbase's and settlement goes through Coinbase, unchanged.
 // ---------------------------------------------------------------------------
 
 export const FURLPAY_FACILITATOR = "https://furlpay.com/api/x402/facilitator";
 
-export interface FacilitatorRequest {
-  x402Version: number;
-  paymentPayload: XPaymentPayload;
-  paymentRequirements: PaymentRequirements;
-}
+/** The envelope is versioned: v1 and v2 carry different inner shapes. */
+export type FacilitatorRequest =
+  | { x402Version: 1; paymentPayload: PaymentPayloadV1; paymentRequirements: PaymentRequirementsV1 }
+  | { x402Version: 2; paymentPayload: PaymentPayloadV2; paymentRequirements: PaymentRequirementsV2 };
 
 export interface VerifyResult {
   isValid: boolean;
   payer?: string;
   invalidReason?: string;
+  invalidMessage?: string;
 }
 
 export interface SettleResult {
@@ -33,6 +37,10 @@ export interface SettleResult {
   network: string;
   payer?: string;
   errorReason?: string;
+  errorMessage?: string;
+  /** Actual amount settled. v2's `upto` scheme can settle LESS than the
+   *  authorized maximum, so the receipt must report this, not the authorization. */
+  amount?: string;
   confirmations?: number;
   requiredConfirmations?: number;
 }
@@ -50,20 +58,18 @@ export interface FacilitatorClient {
 }
 
 export interface HttpFacilitatorOptions {
-  /** Sent as `Authorization: Bearer` — some facilitators meter their callers. */
   apiKey?: string;
-  /** Per-request timeout. A hung facilitator must not hang the origin. */
+  /** A hung facilitator must not hang the origin. */
   timeoutMs?: number;
-  /** Injectable for tests and non-standard runtimes. */
   fetchImpl?: typeof fetch;
 }
 
 /**
  * HTTP facilitator client.
  *
- * Every failure path here fails CLOSED: a timeout, a non-2xx, or an unparseable
- * body resolves to "not valid" / "not settled", never to a released resource.
- * An unreachable facilitator must cost the seller a sale, not the resource.
+ * Every failure path fails CLOSED: a timeout, a non-2xx, or an unparseable body
+ * resolves to "not valid" / "not settled", never to a released resource. A
+ * facilitator you cannot reach must cost you a sale, not the resource.
  */
 export function httpFacilitator(
   baseUrl: string = FURLPAY_FACILITATOR,
@@ -105,7 +111,8 @@ export function httpFacilitator(
       return post<VerifyResult>("/verify", req, (invalidReason) => ({ isValid: false, invalidReason }));
     },
     settle(req) {
-      const network = req.paymentRequirements?.network ?? "unknown";
+      const network =
+        req.x402Version === 2 ? req.paymentRequirements.network : req.paymentRequirements.network;
       return post<SettleResult>("/settle", req, (errorReason) => ({ success: false, network, errorReason }));
     },
     async supported() {
@@ -123,12 +130,4 @@ export function httpFacilitator(
       }
     },
   };
-}
-
-/** Build the request envelope a facilitator expects. */
-export function facilitatorRequest(
-  paymentPayload: XPaymentPayload,
-  paymentRequirements: PaymentRequirements
-): FacilitatorRequest {
-  return { x402Version: X402_VERSION, paymentPayload, paymentRequirements };
 }

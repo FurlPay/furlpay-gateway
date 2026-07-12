@@ -98,3 +98,60 @@ export function claimStoreFrom(
     },
   };
 }
+
+export interface UpstashClaimStoreOptions {
+  /** Upstash REST endpoint, e.g. https://eu2-xxx.upstash.io */
+  url?: string;
+  token?: string;
+  timeoutMs?: number;
+  fetchImpl?: typeof fetch;
+}
+
+/**
+ * Durable claim store backed by Upstash Redis over its REST API.
+ *
+ * Uses `SET key value NX EX ttl`, which is a genuine atomic compare-and-set on
+ * the Redis server — the burn is linearized across every instance, which is the
+ * whole property that makes it safe on serverless. Reads `UPSTASH_REDIS_REST_URL`
+ * and `UPSTASH_REDIS_REST_TOKEN` from the environment when not passed.
+ *
+ * Zero dependencies: it is one HTTP call, so it needs no Redis client library.
+ *
+ * @example
+ *   import { paywall, upstashClaimStore } from "@furlpay/gateway";
+ *   const pay = paywall({ price: 0.01, payTo, quoteSecret, claimStore: upstashClaimStore() });
+ */
+export function upstashClaimStore(opts: UpstashClaimStoreOptions = {}): ClaimStore {
+  const url = (opts.url ?? process.env.UPSTASH_REDIS_REST_URL ?? "").replace(/\/+$/, "");
+  const token = opts.token ?? process.env.UPSTASH_REDIS_REST_TOKEN ?? "";
+  const timeoutMs = opts.timeoutMs ?? 5_000;
+  const doFetch = opts.fetchImpl ?? globalThis.fetch;
+
+  if (!url || !token) {
+    throw new Error(
+      "@furlpay/gateway: upstashClaimStore() needs UPSTASH_REDIS_REST_URL and " +
+        "UPSTASH_REDIS_REST_TOKEN (or explicit url/token). Refusing to start with " +
+        "undurable replay protection that looks durable."
+    );
+  }
+
+  return claimStoreFrom(async (key, ttlSeconds) => {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), timeoutMs);
+    try {
+      // Pipeline-free single command: ["SET", key, "1", "NX", "EX", ttl]
+      const res = await doFetch(url, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify(["SET", key, "1", "NX", "EX", String(ttlSeconds)]),
+        signal: ctl.signal,
+      });
+      if (!res.ok) return false; // fail closed
+      const body = (await res.json()) as { result?: string | null };
+      // Redis returns "OK" when the key was set, null when it already existed.
+      return body?.result === "OK";
+    } finally {
+      clearTimeout(timer);
+    }
+  }, true);
+}
