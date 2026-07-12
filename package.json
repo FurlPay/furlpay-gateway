@@ -1,0 +1,51 @@
+{
+  "name": "@furlpay/gateway",
+  "version": "0.1.0",
+  "description": "Self-hostable x402 monetization gateway — paywall any API, MCP tool, dataset or model endpoint with stablecoin pay-per-call. Framework-agnostic, zero runtime dependencies.",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "furlpay-gateway": "dist/cli.js"
+  },
+  "files": ["dist", "src"],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./express": {
+      "types": "./dist/adapters/express.d.ts",
+      "import": "./dist/adapters/express.js"
+    },
+    "./proxy": {
+      "types": "./dist/adapters/proxy.d.ts",
+      "import": "./dist/adapters/proxy.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test test/protocol.test.js test/gateway.test.js"
+  },
+  "keywords": [
+    "x402",
+    "monetization",
+    "paywall",
+    "agentic-payments",
+    "stablecoin",
+    "usdc",
+    "mcp",
+    "api-monetization",
+    "pay-per-call",
+    "facilitator"
+  ],
+  "repository": { "type": "git", "url": "https://github.com/furlpay/furlpay-gateway" },
+  "homepage": "https://furlpay.com",
+  "engines": { "node": ">=18" },
+  "devDependencies": {
+    "typescript": "5.5.3",
+    "@types/node": "20.14.10"
+  },
+  "publishConfig": { "access": "public" }
+}
