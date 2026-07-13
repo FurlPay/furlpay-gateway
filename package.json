@@ -1,6 +1,6 @@
 {
   "name": "@furlpay/gateway",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Self-hostable x402 monetization gateway — paywall any API, MCP tool, dataset or model endpoint with stablecoin pay-per-call. Framework-agnostic, zero runtime dependencies.",
   "license": "MIT",
   "type": "module",

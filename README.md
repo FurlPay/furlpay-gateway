@@ -1,5 +1,17 @@
 # @furlpay/gateway
 
+[![npm version](https://img.shields.io/npm/v/%40furlpay%2Fgateway?logo=npm&color=cb3837)](https://www.npmjs.com/package/@furlpay/gateway)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![node >= 18](https://img.shields.io/badge/node-%3E%3D18-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org)
+[![zero dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](./package.json)
+
+![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)
+![Node.js](https://img.shields.io/badge/Node.js-339933?logo=nodedotjs&logoColor=white)
+![Express](https://img.shields.io/badge/Express-adapter-000000?logo=express&logoColor=white)
+![USDC](https://img.shields.io/badge/USDC-stablecoin-2775CA?logo=circle&logoColor=white)
+![x402](https://img.shields.io/badge/x402-v1%20%2B%20v2-8A2BE2)
+![MCP](https://img.shields.io/badge/MCP-compatible-FF6B35)
+
 **Paywall any API, MCP tool, dataset, or model endpoint with stablecoin pay-per-call.**
 
 An x402 monetization gateway you host yourself. Point it at an endpoint, set a
