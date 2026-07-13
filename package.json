@@ -9,7 +9,7 @@
   "bin": {
     "furlpay-gateway": "dist/cli.js"
   },
-  "files": ["dist", "src"],
+  "files": ["dist", "src", "LICENSE", "SECURITY.md"],
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
