@@ -40,7 +40,7 @@
     "pay-per-call",
     "facilitator"
   ],
-  "repository": { "type": "git", "url": "https://github.com/furlpay/furlpay-gateway" },
+  "repository": { "type": "git", "url": "git+https://github.com/furlpay/furlpay-gateway.git" },
   "homepage": "https://furlpay.com",
   "engines": { "node": ">=18" },
   "devDependencies": {
