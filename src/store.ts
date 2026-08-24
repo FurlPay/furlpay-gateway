@@ -1,3 +1,4 @@
+import { stripTrailingSlashes } from "./protocol.js";
 // ---------------------------------------------------------------------------
 // Single-use claim store.
 //
@@ -122,7 +123,7 @@ export interface UpstashClaimStoreOptions {
  *   const pay = paywall({ price: 0.01, payTo, quoteSecret, claimStore: upstashClaimStore() });
  */
 export function upstashClaimStore(opts: UpstashClaimStoreOptions = {}): ClaimStore {
-  const url = (opts.url ?? process.env.UPSTASH_REDIS_REST_URL ?? "").replace(/\/+$/, "");
+  const url = stripTrailingSlashes(opts.url ?? process.env.UPSTASH_REDIS_REST_URL ?? "");
   const token = opts.token ?? process.env.UPSTASH_REDIS_REST_TOKEN ?? "";
   const timeoutMs = opts.timeoutMs ?? 5_000;
   const doFetch = opts.fetchImpl ?? globalThis.fetch;

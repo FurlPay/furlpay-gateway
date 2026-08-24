@@ -1,5 +1,6 @@
 import http from "node:http";
 import { Gateway, type GatewayOptions } from "../gateway.js";
+import { stripTrailingSlashes } from "../protocol.js";
 
 // ---------------------------------------------------------------------------
 // Reverse-proxy mode.
@@ -63,7 +64,7 @@ function readRequestBody(req: http.IncomingMessage): Promise<Buffer> {
  */
 export function createProxy(opts: ProxyOptions): http.Server {
   const gateway = new Gateway(opts);
-  const origin = opts.origin.replace(/\/+$/, "");
+  const origin = stripTrailingSlashes(opts.origin);
   const freePaths = opts.freePaths ?? [];
 
   return http.createServer(async (req, res) => {

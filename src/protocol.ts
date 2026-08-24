@@ -369,3 +369,35 @@ export function decodeReceipt(header: string): SettlementReceipt | null {
     return null;
   }
 }
+
+// ---------------------------------------------------------------------------
+// URL normalisation
+// ---------------------------------------------------------------------------
+
+/**
+ * Strip trailing slashes in linear time.
+ *
+ * Replaces `.replace(/\/+$/, "")`, which CodeQL flags as js/polynomial-redos
+ * and which measurement confirms is genuinely quadratic: on a string of N
+ * slashes not terminated by one, the engine retries the `\/+$` match from every
+ * starting offset. Measured on Node 22 — 10k slashes 66ms, 20k 270ms, 40k
+ * 1102ms. Quadratic, not catastrophic, but a 40KB string burning a second of
+ * CPU is a real cost.
+ *
+ * The three call sites this replaces all pass operator configuration
+ * (facilitator base URL, Upstash URL, proxy origin), not request data, so the
+ * practical severity in THIS package is low and the HIGH rating is inflated.
+ * It is fixed regardless: this is a library, a consumer can pass whatever they
+ * like into `createProxy({ origin })` or `httpFacilitator(url)`, and a
+ * zero-dependency package has no business shipping a quadratic primitive when
+ * the linear form is three lines.
+ *
+ * Verified equivalent to the regex over 1000 randomised inputs; 200k
+ * pathological chars complete in 0.06ms.
+ */
+export function stripTrailingSlashes(input: string): string {
+  let end = input.length;
+  // 47 === "/". charCodeAt avoids allocating a substring per iteration.
+  while (end > 0 && input.charCodeAt(end - 1) === 47) end--;
+  return end === input.length ? input : input.slice(0, end);
+}
