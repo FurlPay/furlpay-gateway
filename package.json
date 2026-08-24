@@ -26,7 +26,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test test/protocol.test.js test/gateway.test.js"
+    "test": "npm run build && node --test test/protocol.test.js test/gateway.test.js test/redos.test.js"
   },
   "keywords": [
     "x402",

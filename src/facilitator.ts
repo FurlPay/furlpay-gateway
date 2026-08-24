@@ -4,6 +4,7 @@ import type {
   PaymentRequirementsV1,
   PaymentRequirementsV2,
 } from "./protocol.js";
+import { stripTrailingSlashes } from "./protocol.js";
 
 // ---------------------------------------------------------------------------
 // Facilitator client.
@@ -75,7 +76,7 @@ export function httpFacilitator(
   baseUrl: string = FURLPAY_FACILITATOR,
   opts: HttpFacilitatorOptions = {}
 ): FacilitatorClient {
-  const base = baseUrl.replace(/\/+$/, "");
+  const base = stripTrailingSlashes(baseUrl);
   const timeoutMs = opts.timeoutMs ?? 10_000;
   const doFetch = opts.fetchImpl ?? globalThis.fetch;
 
