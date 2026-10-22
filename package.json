@@ -1,6 +1,6 @@
 {
   "name": "@furlpay/gateway",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Self-hostable x402 monetization gateway — paywall any API, MCP tool, dataset or model endpoint with stablecoin pay-per-call. Framework-agnostic, zero runtime dependencies.",
   "license": "MIT",
   "type": "module",
@@ -26,7 +26,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test test/protocol.test.js test/gateway.test.js"
+    "test": "npm run build && node --test test/protocol.test.js test/gateway.test.js test/proxy-security.test.js"
   },
   "keywords": [
     "x402",

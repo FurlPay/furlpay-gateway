@@ -53,7 +53,7 @@ OPTIONS (expose)
   --network <name>       ${Object.keys(NETWORK_USDC).join(", ")}   (default: base)
   --port <n>             Listen port.                      (default: 4402)
   --facilitator <url>    x402 facilitator.                 (default: FurlPay)
-  --free <paths>         Comma-separated free paths, e.g. /health,/docs*
+  --free <paths>         Comma-separated free paths, e.g. /health,/docs/*
   --public-url <url>     Public base URL if behind TLS termination.
   --no-settle            Verify only; do not settle on-chain. (unsafe)
 

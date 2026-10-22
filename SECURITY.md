@@ -30,6 +30,7 @@ the code — that is why `src/` ships in the tarball.
 | Settlement finality | Confirmation depth scaled to value (3 / 6 / 12) | The facilitator must report depth honestly. A dishonest facilitator can lie; choose one you trust. |
 | Paid content is not cached | `Cache-Control: no-store` + `Vary` on both dialects' headers, on paid responses *and* 402s | In proxy mode the origin's own cache headers are overridden. Behind your own CDN, verify it honours `no-store`. |
 | Facilitator outage | Fails closed | An unreachable facilitator costs you a sale, not the resource. |
+| Proxy decides on the path the origin serves | One canonical path for free check, price, binding and upstream; ambiguous targets refused | The origin must not case-fold or apply its own rewrites that map free paths onto paid ones. See below. |
 
 ## The one that bites people
 
@@ -58,6 +59,47 @@ because silently degrading to in-memory would *look* durable and not be.
 The origin behind `startProxy()` **must not be publicly reachable**, or agents
 will route around the paywall entirely. Bind it to loopback, or firewall it to
 the gateway process.
+
+### Request paths (fixed in 0.1.2)
+
+Up to 0.1.1 the proxy matched `freePaths` against the still-encoded path and
+forwarded it as-is. An origin that decodes before resolving (python
+`http.server`, `serve-static`, most legacy servers) turned
+`/docs%2f..%2fsecret` into `/secret`, so a paid resource behind a free prefix
+was served without payment. `%5c` (backslash) worked the same way.
+
+From 0.1.2 the proxy canonicalizes the request target once and uses that one
+path for the free decision, the price, the quote binding, and the upstream
+request. Targets whose meaning could differ between the gateway and an origin
+are refused with `400 invalid_request_target` before any payment logic or
+upstream request:
+
+- encoded separators (`%2F`, `%5C`) and raw backslashes
+- dot-segments in any spelling (`..`, `%2e%2e`, `.%2E`, `..;x`, Unicode lookalikes)
+- nested encoding (`%25` followed by an escape), malformed escapes, invalid UTF-8
+- empty interior segments (`/a//b`), control characters
+- anything that is not origin-form (`http://host/x`, `//host/x`, `*`)
+
+Escapes of unreserved characters are decoded (`/exp%65nsive` is `/expensive`),
+so an encoded alias is priced and bound as the path it names.
+
+Also in 0.1.2: upstream redirects are returned to the client rather than
+followed (a free path redirecting to a paid one used to be fetched and served),
+an exception during authorization is a `503` that never reaches the origin, and
+a malformed `Host` is refused when `publicUrl` is unset.
+
+**Migration.** A client that sends `%2F` inside a segment, `//`, or dot-segments
+now gets a 400. Normal HTTP clients normalize dot-segments before sending and
+never produce the others. If your origin genuinely needs `%2F` in a segment,
+keep that route paid and put the gateway in front of it unchanged.
+
+**`freePaths` prefixes are string prefixes.** `/docs*` also matches
+`/docs-internal`. Write `/docs/*` to stop at the segment boundary. Patterns are
+validated at startup; an invalid one is an error, not a silently dead rule.
+
+**Case and Unicode.** The gateway does not case-fold. If your origin serves
+`/Secret` and `/secret` as the same file (Windows, macOS default filesystems),
+do not rely on case to separate free and paid paths.
 
 ## Related
 

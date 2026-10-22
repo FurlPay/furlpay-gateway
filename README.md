@@ -106,6 +106,12 @@ npx @furlpay/gateway expose http://localhost:8000 \
 Your origin stays untouched and never learns it's being monetized. **The origin
 must not be publicly reachable**, or agents will simply route around the paywall.
 
+`--free` takes exact paths (`/health`) and prefixes (`/docs/*`). A prefix is a
+plain string prefix, so prefer `/docs/*` over `/docs*`. Request targets with
+encoded separators or dot-segments are refused with a 400 — see
+[SECURITY.md](./SECURITY.md#request-paths-fixed-in-012). **Upgrade to 0.1.2 or
+later**: 0.1.1 and earlier let `/docs%2f..%2fsecret` past a `/docs*` free path.
+
 ---
 
 ## How a payment actually works

@@ -1,5 +1,7 @@
 import http from "node:http";
 import { Gateway, type GatewayOptions } from "../gateway.js";
+import { noStoreHeaders } from "../protocol.js";
+import { canonicalizeTarget, compileFreePaths } from "../path.js";
 
 // ---------------------------------------------------------------------------
 // Reverse-proxy mode.
@@ -41,11 +43,8 @@ const HOP_BY_HOP = new Set([
   "content-length",
 ]);
 
-function isFree(pathname: string, freePaths: string[]): boolean {
-  return freePaths.some((p) =>
-    p.endsWith("*") ? pathname.startsWith(p.slice(0, -1)) : pathname === p
-  );
-}
+/** A Host header we are willing to build a resource identity from. */
+const HOST = /^(?:[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*|\[[0-9A-Fa-f:.]+\])(?::\d{1,5})?$/;
 
 function readRequestBody(req: http.IncomingMessage): Promise<Buffer> {
   return new Promise((resolve, reject) => {
@@ -64,7 +63,7 @@ function readRequestBody(req: http.IncomingMessage): Promise<Buffer> {
 export function createProxy(opts: ProxyOptions): http.Server {
   const gateway = new Gateway(opts);
   const origin = opts.origin.replace(/\/+$/, "");
-  const freePaths = opts.freePaths ?? [];
+  const isFree = compileFreePaths(opts.freePaths ?? []);
 
   return http.createServer(async (req, res) => {
     const send = (status: number, body: unknown, headers: Record<string, string> = {}) => {
@@ -77,19 +76,46 @@ export function createProxy(opts: ProxyOptions): http.Server {
       res.end(payload);
     };
 
+    // One canonical path drives the free decision, the quote binding, and the
+    // upstream request. If those three ever see different strings, an origin
+    // that decodes can be made to serve a resource nobody paid for.
+    const target = canonicalizeTarget(req.url);
+    if (!target.ok) {
+      send(400, { error: "invalid_request_target", detail: target.reason }, noStoreHeaders);
+      return;
+    }
+    const host = req.headers.host ?? "localhost";
+    if (!opts.publicUrl && !HOST.test(host)) {
+      send(400, { error: "invalid_host" }, noStoreHeaders);
+      return;
+    }
+    const url = new URL(target.path + target.search, opts.publicUrl ?? `http://${host}`);
+    if (url.pathname !== target.path) {
+      // The URL parser rewrote a path we already declared canonical. Refuse
+      // rather than guess which of the two the origin will see.
+      send(400, { error: "invalid_request_target", detail: "path is not canonical" }, noStoreHeaders);
+      return;
+    }
+
     try {
-      const base = opts.publicUrl ?? `http://${req.headers.host ?? "localhost"}`;
-      const url = new URL(req.url ?? "/", base);
       const method = (req.method ?? "GET").toUpperCase();
       const body = await readRequestBody(req);
 
-      if (!isFree(url.pathname, freePaths)) {
-        const decision = await gateway.authorize({
-          method,
-          url,
-          headers: req.headers as Record<string, string | undefined>,
-          body: body.length ? body : undefined,
-        });
+      if (!isFree(url.pathname)) {
+        let decision;
+        try {
+          decision = await gateway.authorize({
+            method,
+            url,
+            headers: req.headers as Record<string, string | undefined>,
+            body: body.length ? body : undefined,
+          });
+        } catch {
+          // A facilitator outage or a throwing hook is never a free pass, and
+          // the origin is never contacted.
+          send(503, { error: "payment_verification_unavailable" }, noStoreHeaders);
+          return;
+        }
         if (decision.kind !== "allow") {
           send(decision.status, decision.body, decision.headers);
           return;
@@ -113,6 +139,10 @@ export function createProxy(opts: ProxyOptions): http.Server {
         method,
         headers: forwardHeaders,
         body: method === "GET" || method === "HEAD" ? undefined : body,
+        // Following a redirect here would fetch whatever the origin points at —
+        // a free path redirecting to a paid one would serve it unpaid. The
+        // client gets the 3xx and makes a new request, which is gated again.
+        redirect: "manual",
       });
 
       upstream.headers.forEach((v, k) => {
