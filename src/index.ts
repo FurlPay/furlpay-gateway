@@ -68,6 +68,8 @@ export {
   type PriceResolver,
 } from "./gateway.js";
 
+export { canonicalizeTarget, compileFreePaths, type CanonicalTarget } from "./path.js";
+
 export {
   paywall,
   createGateway,
